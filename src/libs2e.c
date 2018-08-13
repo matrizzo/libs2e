@@ -265,6 +265,11 @@ static int handle_kvm_vcpu_ioctl(int fd, int request, uint64_t arg1) {
             ret = s2e_kvm_vcpu_nmi(fd);
         } break;
 
+        /***********************************************/
+        case KVM_SET_GUEST_DEBUG: {
+            ret = s2e_kvm_vcpu_set_guest_debug(fd, (struct kvm_guest_debug *) arg1);
+        } break;
+
         default: {
             fprintf(stderr, "libs2e: unknown KVM VCPU IOCTL vcpu %d request=%#x arg=%#" PRIx64 " ret=%#x\n", fd,
                     request, arg1, ret);

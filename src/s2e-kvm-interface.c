@@ -53,6 +53,11 @@ static const uint64_t S2E_STACK_SIZE = 1024 * 1024 * 1024;
 int s2e_dev_save(const void *buffer, size_t size);
 int s2e_dev_restore(void *buffer, int pos, size_t size);
 
+#define BP_GDB 0x10
+void cpu_single_step(CPUArchState *env, int enabled);
+int cpu_breakpoint_insert(CPUArchState *env, target_ulong pc, int flags, CPUBreakpoint **breakpoint);
+int cpu_breakpoint_remove(CPUArchState *env, target_ulong pc, int flags);
+
 extern CPUX86State *env;
 extern void *g_s2e;
 
@@ -64,6 +69,7 @@ CPUX86State *g_cpu_env;
 #define false 0
 
 int g_signal_pending = 0;
+uint32_t guest_debug = 0;
 
 struct stats_t g_stats;
 
@@ -355,8 +361,9 @@ int s2e_kvm_create_vm(int kvm_fd) {
 #ifdef CONFIG_SYMBEX
     g_s2e_shared_dir = getenv("S2E_SHARED_DIR");
     if (!g_s2e_shared_dir) {
-        fprintf(stderr, "Warning: S2E_SHARED_DIR environment variable was not specified, "
-                        "using %s\n",
+        fprintf(stderr,
+                "Warning: S2E_SHARED_DIR environment variable was not specified, "
+                "using %s\n",
                 CONFIG_LIBCPU_DATADIR);
         g_s2e_shared_dir = CONFIG_LIBCPU_DATADIR;
     }
@@ -531,6 +538,24 @@ int s2e_kvm_vm_mem_rw(int vm_fd, struct kvm_mem_rw *mem) {
 
     s2e_kvm_request_exit();
     pthread_mutex_lock(&s_cpu_lock);
+
+    // if (mem->length == 1 && mem->is_write) {
+    //     uint8_t tmp;
+    //     cpu_host_memory_rw(mem->dest, (uintptr_t)&tmp, mem->length, 0);
+
+    //     if (*(uint8_t*)mem->source == 0xcc) {
+    //         cpu_breakpoint_insert(env, mem->dest, BP_GDB, NULL);
+    //         printf("Inserting software breakpoint at %#llx\n", mem->dest);
+    //     } else if (tmp == 0xcc) {
+    //         cpu_breakpoint_remove(env, mem->dest, BP_GDB);
+    //         printf("Removing software breakpoint from %#llx\n", mem->dest);
+    //     } else {
+    //         cpu_host_memory_rw(mem->source, mem->dest, mem->length, mem->is_write);
+    //     }
+    // } else {
+    //     cpu_host_memory_rw(mem->source, mem->dest, mem->length, mem->is_write);
+    // }
+
     cpu_host_memory_rw(mem->source, mem->dest, mem->length, mem->is_write);
     pthread_mutex_unlock(&s_cpu_lock);
     return 0;
@@ -652,7 +677,7 @@ static void coroutine_fn s2e_kvm_cpu_coroutine(void *opaque) {
 
         env->exit_request = 0;
         cpu_x86_exec(env);
-// printf("cpu_exec return %#x\n", ret);
+        // printf("cpu_exec return %#x\n", ret);
 
 #ifdef SE_KVM_DEBUG_IRQ
         bool mflags_changed = (prev_mflags != env->mflags);
@@ -665,6 +690,46 @@ static void coroutine_fn s2e_kvm_cpu_coroutine(void *opaque) {
 #endif
 
         assert(env->current_tb == NULL);
+
+        if (guest_debug & KVM_GUESTDBG_ENABLE) {
+            // fprintf(stderr, "Exception %d\n", env->exception_index);
+            switch (env->exception_index) {
+                // Int 3
+                case 3:
+                    if (guest_debug & KVM_GUESTDBG_USE_SW_BP) {
+                        g_kvm_vcpu_buffer->exit_reason = KVM_EXIT_DEBUG;
+                        g_kvm_vcpu_buffer->debug.arch.pc = env->eip;
+                        g_kvm_vcpu_buffer->debug.arch.exception = 3;
+                    }
+                    break;
+                // Single step
+                case EXCP_DEBUG:
+                    if (guest_debug & KVM_GUESTDBG_SINGLESTEP) {
+                        // Singlestep flag
+                        g_kvm_vcpu_buffer->debug.arch.dr6 = env->dr[6] | (1 << 14);
+                        g_kvm_vcpu_buffer->debug.arch.dr7 = env->dr[7];
+                        g_kvm_vcpu_buffer->exit_reason = KVM_EXIT_DEBUG;
+                        g_kvm_vcpu_buffer->debug.arch.pc = env->eip;
+                        g_kvm_vcpu_buffer->debug.arch.exception = 1;
+                    }
+                    break;
+            }
+        }
+
+        // if (env->exception_index == EXCP_DEBUG || env->exception_index == 3) {
+        //     // Single step or sw breakpoint
+        //     g_kvm_vcpu_buffer->exit_reason = KVM_EXIT_DEBUG;
+        //     g_kvm_vcpu_buffer->debug.arch.pc = env->eip;
+
+        //     if (env->singlestep_enabled) {
+        //         g_kvm_vcpu_buffer->debug.arch.exception = 1;
+
+        //         // Set singlestep flag in dr6
+        //         g_kvm_vcpu_buffer->debug.arch.dr6 |= (1 << 14);
+        //     } else {
+        //         g_kvm_vcpu_buffer->debug.arch.exception = 3;
+        //     }
+        // }
 
         env->exception_index = 0;
         coroutine_yield();
@@ -835,6 +900,28 @@ int s2e_kvm_vcpu_interrupt(int vcpu_fd, struct kvm_interrupt *interrupt) {
 
 int s2e_kvm_vcpu_nmi(int vcpu_fd) {
     env->interrupt_request |= CPU_INTERRUPT_NMI;
+    return 0;
+}
+
+int s2e_kvm_vcpu_set_guest_debug(int fd, struct kvm_guest_debug *dbg) {
+    target_ulong old_mflags = env->mflags;
+    if (guest_debug & KVM_GUESTDBG_SINGLESTEP) {
+        old_mflags &= ~(TF_MASK | RF_MASK);
+    }
+
+    guest_debug = dbg->control;
+    if (!(guest_debug & KVM_GUESTDBG_ENABLE)) {
+        guest_debug = 0;
+    }
+
+    cpu_single_step(env, guest_debug & KVM_GUESTDBG_SINGLESTEP);
+
+    if (guest_debug & KVM_GUESTDBG_SINGLESTEP) {
+        old_mflags |= (TF_MASK | RF_MASK);
+    }
+
+    env->mflags = old_mflags;
+
     return 0;
 }
 
