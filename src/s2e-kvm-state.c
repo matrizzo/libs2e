@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,7 +18,14 @@
 #include <timer.h>
 #include "s2e-kvm-interface.h"
 
+#ifdef CONFIG_SYMBEX
+#include <s2e/s2e_libcpu.h>
+#endif
+
 extern CPUX86State *env;
+
+#define CPU_OFFSET(f) offsetof(CPUX86State, f)
+#define CPU_SIZE(f) sizeof(((CPUX86State *)NULL)->f)
 
 // clang-format off
 static uint32_t s_msr_list [] = {
@@ -299,34 +307,69 @@ int s2e_kvm_vcpu_set_mp_state(int vcpu_fd, struct kvm_mp_state *mp) {
     return 0;
 }
 
-int s2e_kvm_vcpu_get_regs(int vcpu_fd, struct kvm_regs *regs) {
-    regs->rax = env->regs[R_EAX];
-    regs->rbx = env->regs[R_EBX];
-    regs->rcx = env->regs[R_ECX];
-    regs->rdx = env->regs[R_EDX];
-    regs->rsi = env->regs[R_ESI];
-    regs->rdi = env->regs[R_EDI];
-    regs->rsp = env->regs[R_ESP];
-    regs->rbp = env->regs[R_EBP];
+int s2e_kvm_vcpu_get_regs(int vcpu_fd, struct kvm_regs *kvm_regs) {
+#ifndef CONFIG_SYMBEX
+
+    kvm_regs->rax = env->regs[R_EAX];
+    kvm_regs->rbx = env->regs[R_EBX];
+    kvm_regs->rcx = env->regs[R_ECX];
+    kvm_regs->rdx = env->regs[R_EDX];
+    kvm_regs->rsi = env->regs[R_ESI];
+    kvm_regs->rdi = env->regs[R_EDI];
+    kvm_regs->rsp = env->regs[R_ESP];
+    kvm_regs->rbp = env->regs[R_EBP];
 
 #ifdef TARGET_X86_64
-    regs->r8 = env->regs[8];
-    regs->r9 = env->regs[9];
-    regs->r10 = env->regs[10];
-    regs->r11 = env->regs[11];
-    regs->r12 = env->regs[12];
-    regs->r13 = env->regs[13];
-    regs->r14 = env->regs[14];
-    regs->r15 = env->regs[15];
+    kvm_regs->r8 = env->regs[8];
+    kvm_regs->r9 = env->regs[9];
+    kvm_regs->r10 = env->regs[10];
+    kvm_regs->r11 = env->regs[11];
+    kvm_regs->r12 = env->regs[12];
+    kvm_regs->r13 = env->regs[13];
+    kvm_regs->r14 = env->regs[14];
+    kvm_regs->r15 = env->regs[15];
 #endif
 
-    regs->rip = env->eip;
-
     if (!g_handling_kvm_cb) {
-        regs->rflags = cpu_get_eflags(env);
+        kvm_regs->rflags = cpu_get_eflags(env);
     } else {
         fprintf(stderr, "warning: kvm asking cpu state while handling io\n");
     }
+
+#else /* CONFIG_SYMBEX */
+
+    memset(kvm_regs, 0, sizeof(*kvm_regs));
+
+    s2e_read_register_symbolic(CPU_OFFSET(regs[R_EAX]), (uint8_t *)&kvm_regs->rax, CPU_SIZE(regs[R_EAX]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[R_EBX]), (uint8_t *)&kvm_regs->rbx, CPU_SIZE(regs[R_EBX]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[R_ECX]), (uint8_t *)&kvm_regs->rcx, CPU_SIZE(regs[R_ECX]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[R_EDX]), (uint8_t *)&kvm_regs->rdx, CPU_SIZE(regs[R_EDX]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[R_ESI]), (uint8_t *)&kvm_regs->rsi, CPU_SIZE(regs[R_ESI]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[R_EDI]), (uint8_t *)&kvm_regs->rdi, CPU_SIZE(regs[R_EDI]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[R_ESP]), (uint8_t *)&kvm_regs->rsp, CPU_SIZE(regs[R_ESP]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[R_EBP]), (uint8_t *)&kvm_regs->rbp, CPU_SIZE(regs[R_EBP]) * 8);
+
+#ifdef TARGET_X86_64
+    s2e_read_register_symbolic(CPU_OFFSET(regs[8]), (uint8_t *)&kvm_regs->r8, CPU_SIZE(regs[8]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[9]), (uint8_t *)&kvm_regs->r9, CPU_SIZE(regs[9]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[10]), (uint8_t *)&kvm_regs->r10, CPU_SIZE(regs[10]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[11]), (uint8_t *)&kvm_regs->r11, CPU_SIZE(regs[11]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[12]), (uint8_t *)&kvm_regs->r12, CPU_SIZE(regs[12]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[13]), (uint8_t *)&kvm_regs->r13, CPU_SIZE(regs[13]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[14]), (uint8_t *)&kvm_regs->r14, CPU_SIZE(regs[14]) * 8);
+    s2e_read_register_symbolic(CPU_OFFSET(regs[15]), (uint8_t *)&kvm_regs->r15, CPU_SIZE(regs[15]) * 8);
+#endif
+
+    if (!g_handling_kvm_cb) {
+        s2e_read_register_symbolic(CPU_OFFSET(cc_src), (uint8_t *)&kvm_regs->rflags, CPU_SIZE(cc_src) * 8);
+        kvm_regs->rflags |= (env->mflags | (env->df & DF_MASK) | 2);
+    } else {
+        fprintf(stderr, "warning: kvm asking cpu state while handling io\n");
+    }
+
+#endif /* CONFIG_SYMBEX */
+
+    kvm_regs->rip = env->eip;
 
     return 0;
 }
