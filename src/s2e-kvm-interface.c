@@ -90,7 +90,7 @@ static volatile bool s_in_kvm_run = false;
 static volatile bool s_s2e_exiting = false;
 static volatile bool s_timer_exited = false;
 
-static pthread_mutex_t s_cpu_lock;
+pthread_mutex_t s_cpu_lock;
 static pthread_t s_timer_thread;
 
 extern struct cpu_io_funcs_t g_io;
