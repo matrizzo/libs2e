@@ -55,6 +55,7 @@ int s2e_dev_restore(void *buffer, int pos, size_t size);
 
 #define BP_GDB 0x10
 int guest_debug_catch_int3 = 0;
+extern int singlestep_enabled;
 void cpu_single_step(CPUArchState *env, int enabled);
 int cpu_breakpoint_insert(CPUArchState *env, target_ulong pc, int flags, CPUBreakpoint **breakpoint);
 int cpu_breakpoint_remove(CPUArchState *env, target_ulong pc, int flags);
@@ -94,6 +95,7 @@ pthread_mutex_t s_cpu_lock;
 static pthread_t s_timer_thread;
 
 extern struct cpu_io_funcs_t g_io;
+extern QTAILQ_HEAD(breakpoints_head, CPUBreakpoint) breakpoints;
 
 static void s2e_kvm_cpu_exit_signal(int signum) {
     env->kvm_request_interrupt_window = 1;
@@ -902,22 +904,20 @@ int s2e_kvm_vcpu_set_guest_debug(int fd, struct kvm_guest_debug *dbg) {
 
     cpu_single_step(env, guest_debug & KVM_GUESTDBG_SINGLESTEP);
 
+    cpu_breakpoint_remove_all(env, BP_GDB);
+
     // Use libcpu breakpoints to simulate hardware breakpoints
     if (guest_debug & KVM_GUESTDBG_USE_HW_BP) {
         for (int i = 0; i < 4; i++) {
-            if (dbg->arch.debugreg[7] | (2 << (i * 2))) {
+            if (dbg->arch.debugreg[7] & (2 << (i * 2))) {
                 // hwbreak i enabled
                 uint8_t bp_type = ((dbg->arch.debugreg[7] & (0x3 << (16 + (i * 4)))) >> (16 + (i * 4)));
                 if (bp_type == 0) {
                     // is execute breakpoint
                     cpu_breakpoint_insert(env, dbg->arch.debugreg[i], BP_GDB, NULL);
                 }
-            } else {
-                cpu_breakpoint_remove(env, dbg->arch.debugreg[i], BP_GDB);
             }
         }
-    } else {
-        cpu_breakpoint_remove_all(env, BP_GDB);
     }
 
     if (guest_debug & KVM_GUESTDBG_SINGLESTEP) {
